@@ -1,3 +1,6 @@
+#modified by Yuhao Wan
+#original from Daniel Ziegler
+
 import tensorflow as tf
 import numpy as np
 import gym
