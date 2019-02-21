@@ -61,7 +61,7 @@ def train(
     obs_dim = env.observation_space.shape[0]
     n_actions = env.action_space.n
 
-    with tf.variable_scope('main'):
+    with tf.variable_scope('main') as scope:
         obs_ph = tf.placeholder(dtype=tf.float32, shape=[None, obs_dim])
         final_hidden = mlp(obs_ph, hidden_sizes=[hidden_size]*n_layers)
         #advantage stream
@@ -69,10 +69,10 @@ def train(
         #value stream
         v_net = tf.layers.dense(final_hidden, units=1,  activation=None)
         #combine the two by substracting the mean advantage
-        q_vals = v_net + (a_net - tf.reduce_mean(a_net, axis=1, keep_dims=True))
+        q_vals = v_net + (a_net - tf.reduce_mean(a_net, axis=1, keepdims=True))
         main_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope.name)
 
-    with tf.variable_scope('target'):
+    with tf.variable_scope('target') as scope:
         obs_targ_ph = tf.placeholder(dtype=tf.float32, shape=[None, obs_dim])
         final_hidden = mlp(obs_targ_ph, hidden_sizes=[hidden_size]*n_layers)
         #advantage stream
@@ -80,12 +80,21 @@ def train(
         #value stream
         v_net = tf.layers.dense(final_hidden, units=1,  activation=None)
         #combine the two by substracting the mean advantage
-        q_vals_targ = v_net + (a_net - tf.reduce_mean(a_net, axis=1, keep_dims=True))
+        q_vals_targ = v_net + (a_net - tf.reduce_mean(a_net, axis=1, keepdims=True))
         target_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope.name)
+    
+    with tf.variable_scope('main', reuse=True):
+        final_hidden_2 = mlp(obs_targ_ph, hidden_sizes=[hidden_size]*n_layers)
+        #advantage stream
+        a_net_2 = tf.layers.dense(final_hidden_2, units=n_actions, activation=None)
+        #value stream
+        v_net_2 = tf.layers.dense(final_hidden_2, units=1,  activation=None)
+        #combine the two by substracting the mean advantage
+        q_vals_2 = v_net_2 + (a_net_2 - tf.reduce_mean(a_net_2, axis=1, keepdims=True))
 
     rewards_ph = tf.placeholder(dtype=tf.float32, shape=[None])
     dones_ph = tf.placeholder(dtype=tf.bool, shape=[None])
-    best_acts = tf.argmax(q_vals, axis=1)
+    best_acts = tf.argmax(q_vals_2, axis=1)
     best_acts_one_hots = tf.one_hot(best_acts, n_actions)
     #use target network to evaluate best actions
     optimal_future_q = gamma * tf.reduce_sum(best_acts_one_hots * q_vals_targ, axis=1)

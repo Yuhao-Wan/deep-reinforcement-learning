@@ -76,11 +76,16 @@ def train(
         q_vals_targ = tf.layers.dense(final_hidden, units=n_actions, activation=None)
         target_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope.name)
 
+    with tf.variable_scope('main', reuse=True):
+        final_hidden_2 = mlp(obs_targ_ph, hidden_sizes=[hidden_size]*n_layers)
+        q_vals_2 = tf.layers.dense(final_hidden_2, units=n_actions, activation=None)
+
+
     rewards_ph = tf.placeholder(dtype=tf.float32, shape=[None])
     dones_ph = tf.placeholder(dtype=tf.bool, shape=[None])
     
     #select best actions from main network
-    best_acts = tf.argmax(q_vals, axis=1)
+    best_acts = tf.argmax(q_vals_2, axis=1)
     best_acts_one_hots = tf.one_hot(best_acts, n_actions)
 
     #evaluate action values using target network
