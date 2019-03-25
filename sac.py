@@ -1,6 +1,11 @@
 import tensorflow as tf 
 import numpy as np
 import gym
+import time 
+from spinup.utils.logx import EpochLogger
+import matplotlib
+matplotlib.use('PS')
+import matplotlib.pyplot as plt
 
 class ReplayBuffer:
     def __init__(self, obs_dim, act_dim, buf_size=int(1e6)):
@@ -21,7 +26,7 @@ class ReplayBuffer:
         self.indx = (self.indx+1) % self.max_size
         self.cur_size = min(self.cur_size+1, self.max_size)
 
-    def sample(self, batch_size=256):
+    def sample(self, batch_size=100):
         samp_idxs = np.random.randint(self.cur_size, size=batch_size)
         sample = dict(cobs=self.cobs_buf[samp_idxs],
                       nobs=self.nobs_buf[samp_idxs],
@@ -30,19 +35,30 @@ class ReplayBuffer:
                       done=self.done_buf[samp_idxs])
         return sample
 
-def sac(env_name='Pendulum-v0',
+def sac(env_name='HalfCheetah-v2',
         hidden_sizes=(16,16),
         gamma=0.99,
         alpha=0.2,
         lr=3e-4,
         tau=5e-3,
         num_epochs=100,
-        steps_per_epoch=1000):
+        steps_per_epoch=5000,
+        logger_kwargs=dict(),
+        seed=0):
     
+
+    logger = EpochLogger(**logger_kwargs)
+    logger.save_config(locals())
+
+    tf.set_random_seed(seed)
+    np.random.seed(seed)
+
     # Create environment
     env = gym.make(env_name)
+    test_env = gym.make(env_name)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
+
     # Create placeholders
     cobs_ph = tf.placeholder(tf.float32, [None, obs_dim], name="current_obs")
     nobs_ph = tf.placeholder(tf.float32, [None, obs_dim], name="next_obs")
@@ -68,12 +84,11 @@ def sac(env_name='Pendulum-v0',
         mu = mlp(x, hidden_sizes=list(hidden_sizes)+[act_dim], activation=activation, output_activation=output_activation)
         log_std = tf.get_variable(name="log_std", initializer=np.array([-0.5] * act_dim, dtype=np.float32))
         pi = tf.random.normal(tf.shape(mu), mean=mu, stddev=tf.exp(log_std), dtype=tf.float32)
-        logp = gaussian_likelihood(a, mu, log_std)
         logp_pi = gaussian_likelihood(pi, mu, log_std)
-        return pi, logp, logp_pi
-        #pi: Sampling stochastic actions from a Gaussian distribution.
-        #logp: Computing log-likelihoods of actions from a Gaussian distribution.
-        #logp_pi: Computing log-likelihoods of actions in pi from a Gaussian distribution.
+        logp_pi -= tf.reduce_sum(2*(np.log(2) - pi - tf.nn.softplus(-2*pi)), axis=1)
+        pi = tf.tanh(pi)
+        mu = tf.tanh(mu)
+        return pi, mu, logp_pi
 
     # Main value network
     with tf.variable_scope('v_main') as scope:
@@ -92,7 +107,7 @@ def sac(env_name='Pendulum-v0',
 
     # Policy network
     with tf.variable_scope('pi') as scope:
-        pi, logp, logp_pi = mlp_gaussian_policy(cobs_ph, acts_ph)
+        pi, mu, logp_pi = mlp_gaussian_policy(cobs_ph, acts_ph)
 
     # Q networks using policy actions
     q_pi_input = tf.concat([cobs_ph, pi], axis=-1)
@@ -130,6 +145,8 @@ def sac(env_name='Pendulum-v0',
             tf.assign(v_t, tau * v_t + (1 - tau) * v_m)
             for v_m, v_t in zip(tf.global_variables('v_main'), tf.global_variables('v_target'))
         ]
+    step_ops = [p_loss, q1_loss, q2_loss, v_loss, q1, q2, v_main, logp_pi, 
+                p_train_op, v_train_op, t_update]
     t_init = [
         tf.assign(v_t, v_m)
         for v_m, v_t in zip(tf.global_variables('v_main'), tf.global_variables('v_target'))
@@ -139,39 +156,80 @@ def sac(env_name='Pendulum-v0',
     sess = tf.Session()
     sess.run(tf.global_variables_initializer())
     sess.run(t_init)
-    
-    def get_act(cobs):
+
+    logger.setup_tf_saver(sess, inputs={'obs': cobs_ph, 'act': acts_ph}, 
+                                outputs={'mu': mu, 'pi': pi, 'q1': q1, 'q2': q2, 'v_main': v_main})
+
+    def get_act(cobs, deterministic=False):
         feed_dict = {cobs_ph: cobs.reshape(1, -1)}
-        act = sess.run(pi, feed_dict)
-        act = tf.squeeze(act, axis=1)
+        if deterministic:
+            act = sess.run(mu, feed_dict)[0]
+        else:
+            act = sess.run(pi, feed_dict)[0]
         return act
 
     def target_update():
-        cobs, nobs, acts, rwds, done = buffer.sample()
-        feed_dict = {cobs_ph: cobs, nobs_ph: nobs, acts_ph: acts, rwds_ph: rwds, done_ph: np.float32(done)}
-        sess.run(t_update, feed_dict)
+        cobs, nobs, acts, rwds, done = buffer.sample().values()
+        feed_dict = {cobs_ph: cobs, nobs_ph: nobs, acts_ph: acts, rwds_ph: rwds, done_ph: done}
+        outs = sess.run(step_ops, feed_dict)
+        logger.store(LossPi=outs[0], LossQ1=outs[1], LossQ2=outs[2],
+                     LossV=outs[3], Q1Vals=outs[4], Q2Vals=outs[5],
+                     VVals=outs[6], LogPi=outs[7])
     
-    total_ep_rwds = []
+    start_time = time.time()
+    avg_rwd = []
     for epoch in range(num_epochs):
         cobs = env.reset()
-        ep_rwds = 0
+        done = False
+        rwd = 0
+        ep_len = 0
+        ep_rwd = 0
         for _ in range(steps_per_epoch):
             act = get_act(cobs)
             nobs, rwd, done, _ = env.step(act)
             buffer.update(cobs, nobs, act, rwd, done)
             cobs = nobs
-            ep_rwds += rwd
+            ep_rwd += rwd
             target_update()
-            print('Epoch: %i' % epoch, '|Epoch_reward: %i' % ep_rwds)
-            if epoch == 0: 
-                total_ep_rwds.append(ep_rwds)
-            else:
-                total_ep_rwds.append(total_ep_rwds[-1]*0.9 + ep_rwds*0.1)
+        logger.store(EpRet=ep_rwd, EpLen=ep_len)
+        
+        test_rwd = []
+        for _ in range(10):
+            cobs = test_env.reset()
+            done = False
+            rwd = 0
+            ep_rwd = 0
+            ep_len = 0
+            while not(done or (ep_len == 1000)):
+                # Take deterministic actions at test time 
+                cobs, rwd, done, _ = test_env.step(get_act(cobs, True))
+                ep_rwd += rwd
+                ep_len += 1
+            logger.store(TestEpRet=ep_rwd, TestEpLen=ep_len)
+            test_rwd.append(ep_rwd)
+        avg_rwd.append(np.mean(test_rwd))
+        logger.log_tabular('Epoch', epoch)
+        logger.log_tabular('EpRet', with_min_and_max=True)
+        logger.log_tabular('TestEpRet', with_min_and_max=True)
+        logger.log_tabular('EpLen', average_only=True)
+        logger.log_tabular('TestEpLen', average_only=True)
+        logger.log_tabular('Q1Vals', with_min_and_max=True) 
+        logger.log_tabular('Q2Vals', with_min_and_max=True) 
+        logger.log_tabular('VVals', with_min_and_max=True) 
+        logger.log_tabular('LogPi', with_min_and_max=True)
+        logger.log_tabular('LossPi', average_only=True)
+        logger.log_tabular('LossQ1', average_only=True)
+        logger.log_tabular('LossQ2', average_only=True)
+        logger.log_tabular('LossV', average_only=True)
+        logger.log_tabular('Time', time.time()-start_time)
+        logger.dump_tabular()
 
-    plt.plot(np.arange(len(ep_rwd)), ep_rwd)
+    plt.plot(np.arange(len(avg_rwd)), avg_rwd)
     plt.xlabel('Episode')
     plt.ylabel('Moving averaged episode reward')
     plt.show()
 
 if __name__ == '__main__':
-    sac()
+    from spinup.utils.run_utils import setup_logger_kwargs
+    logger_kwargs = setup_logger_kwargs('sac', 0)
+    sac(logger_kwargs=logger_kwargs)
