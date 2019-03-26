@@ -26,7 +26,7 @@ class ReplayBuffer:
         self.indx = (self.indx+1) % self.max_size
         self.cur_size = min(self.cur_size+1, self.max_size)
 
-    def sample(self, batch_size=100):
+    def sample(self, batch_size=256):
         samp_idxs = np.random.randint(self.cur_size, size=batch_size)
         sample = dict(cobs=self.cobs_buf[samp_idxs],
                       nobs=self.nobs_buf[samp_idxs],
@@ -36,13 +36,13 @@ class ReplayBuffer:
         return sample
 
 def sac(env_name='HalfCheetah-v2',
-        hidden_sizes=(16,16),
+        hidden_sizes=(256,256),
         gamma=0.99,
-        alpha=0.2,
+        alpha=0.1,
         lr=3e-4,
         tau=5e-3,
         num_epochs=100,
-        steps_per_epoch=5000,
+        steps_per_epoch=1000,
         logger_kwargs=dict(),
         seed=0):
     
@@ -142,7 +142,7 @@ def sac(env_name='HalfCheetah-v2',
         v_train_op = v_opt.minimize(total_v_loss, var_list=v_params)
     with tf.control_dependencies([v_train_op]):
         t_update = [
-            tf.assign(v_t, tau * v_t + (1 - tau) * v_m)
+            tf.assign(v_t, (1 - tau) * v_t + tau * v_m)
             for v_m, v_t in zip(tf.global_variables('v_main'), tf.global_variables('v_target'))
         ]
     step_ops = [p_loss, q1_loss, q2_loss, v_loss, q1, q2, v_main, logp_pi, 
@@ -224,10 +224,11 @@ def sac(env_name='HalfCheetah-v2',
         logger.log_tabular('Time', time.time()-start_time)
         logger.dump_tabular()
 
+    fig = plt.figure()
     plt.plot(np.arange(len(avg_rwd)), avg_rwd)
     plt.xlabel('Episode')
     plt.ylabel('Moving averaged episode reward')
-    plt.show()
+    fig.savefig('/Users/yuhaowan/Desktop/sac_plot.png')
 
 if __name__ == '__main__':
     from spinup.utils.run_utils import setup_logger_kwargs
