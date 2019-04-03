@@ -92,9 +92,9 @@ def sac(env_name='HalfCheetah-v2',
 		log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)
 		pi = tf.random.normal(tf.shape(mu), mean=mu, stddev=tf.exp(log_std), dtype=tf.float32)
 		logp_pi = gaussian_likelihood(pi, mu, log_std)
+		logp_pi -= tf.reduce_sum(2*(np.log(2) - pi - tf.nn.softplus(-2*pi)), axis=1)
 		mu = tf.tanh(mu)
 		pi = tf.tanh(pi)
-		logp_pi -= tf.reduce_sum(2*(np.log(2) - pi - tf.nn.softplus(-2*pi)), axis=1)
 		return pi, mu, logp_pi
 
 	# Policy network
@@ -119,11 +119,11 @@ def sac(env_name='HalfCheetah-v2',
 	
 	# Main value network
 	with tf.variable_scope('v_main') as scope:
-		v_main = mlp(cobs_ph, list(hidden_sizes)+[1])
+		v_main = tf.squeeze(mlp(cobs_ph, list(hidden_sizes)+[1]))
 
 	# Target value network
 	with tf.variable_scope('v_target') as scope:
-		v_target = mlp(nobs_ph, list(hidden_sizes)+[1])
+		v_target = tf.squeeze(mlp(nobs_ph, list(hidden_sizes)+[1]))
 
 	# Define soft Q-function objective
 	nq = tf.stop_gradient(rwds_ph + gamma * (1 - done_ph) * v_target)
